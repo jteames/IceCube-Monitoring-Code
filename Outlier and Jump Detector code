@@ -1,0 +1,734 @@
+import tables
+import sys
+import math
+import matplotlib.pyplot as plt
+import numpy as np
+import json
+import os
+from datetime import datetime
+from datetime import datetime, timedelta
+from collections import Counter
+import scipy.stats as stats
+import scipy.optimize as optimize
+import scipy.integrate as integrate
+from scipy.optimize import curve_fit
+import matplotlib.ticker as ticker
+from matplotlib.ticker import ScalarFormatter, FuncFormatter
+
+##############################################
+
+All the functions needed for the code
+
+##############################################
+
+def get_linear_regression(x,y,yerr):  # pylint: disable=unused-argument
+    '''
+    Returns linear regression information for the regression tests.
+    Since this function may be called multiple times for the same dataset,
+    the result gets cached to avoid any overhead.
+    '''
+    # pylint: disable=unused-variable
+    # Shortcut for later (pep8)
+    nparr = np.array
+    #dtsec = misc.delta_seconds    # NOTE: ref_times WAS used to show an extrapolation of the lin-reg
+    # plotting, but it confuses things
+    # __ref_times, __ref_entries, __ref_dur = nparr(dataset['ref_points']).T    dat_times, dat_entries = nparr(dataset['points_limited']).T
+    #dat_errors_m, dat_errors_p = nparr(dataset['errors_limited']).T    # prep the data
+    #times1, entries1, errors1 = ref_data_qc(dataset['refruns_pe_limited'])
+    #times2, entries2, errors2 = data_qc(dat_times,
+    #                                    dat_entries,
+    #                                    dat_errors_p)    # shift x-axis before fitting to a place between the runs
+    
+    
+    times1 = x[:-int(len(x)/2)]
+    times2 = x[int(len(x)/2):]
+    entries1 = y[:-int(len(y)/2)]
+    entries2 = y[int(len(y)/2):]
+    errors1 = yerr[:-int(len(yerr)/2)]
+    errors2 = yerr[int(len(yerr)/2):]
+    fit_mid_point = times1[-1]
+    centers1 = nparr([(t - fit_mid_point) for t in times1])
+    centers2 = nparr([(t - fit_mid_point) for t in times2])    
+    fit_results1 = chi2fit(centers1, entries1, errors1)
+    # fit_results2 = chi2fit(centers2, entries2, errors2)    # testing this bit in 7816-test-mod-to-linear-regression
+    fit_results2 = chi2fit(nparr(list(centers1) + list(centers2)),
+                           nparr(list(entries1) + list(entries2)),
+                           nparr(list(errors1) + list(errors2))) 
+    
+    #print(fit_results1,fit_results2)
+    # calculate significance of distance between the two
+    # point-estimates in (slope-offset)-space, based on
+    # cov matrix error propagation
+    slope1, offset1 = fit_results1[2]
+    slope2, offset2 = fit_results2[2]
+    vector1 = np.array([[slope1[0]], [offset1[0]]])
+    vector2 = np.array([[slope2[0]], [offset2[0]]])
+    cov1 = fit_results1[3]
+    cov2 = fit_results2[3]
+    combined_p = covariance_form_test(vector1, cov1, vector2, cov2)    # shift x-axis before generting the fit line and errors
+    # this is messing up the plotting a little bit (mkauer)
+    # display_mid_point = misc.mid_t(ref_times[-1], dat_times[0])
+    display_mid_point = fit_mid_point
+    ref_centers = nparr([(t - display_mid_point) for t in times1])
+    dat_centers = nparr([(t - display_mid_point) for t in times2])    # calculate fit points in each period
+    fit1_points1 = fit_results1[0](ref_centers)
+    fit1_points2 = fit_results1[0](dat_centers)
+    fit2_points1 = fit_results2[0](ref_centers)
+    fit2_points2 = fit_results2[0](dat_centers)    # calculate 1-sigma errorbands
+    fit1_errs1 = fit_results1[1](ref_centers)
+    fit1_errs2 = fit_results1[1](dat_centers)
+    fit2_errs1 = fit_results2[1](ref_centers)
+    fit2_errs2 = fit_results2[1](dat_centers)    
+    centers12 = nparr(list(ref_centers) + list(dat_centers))
+    fit_line1 = nparr(list(fit1_points1) + list(fit1_points2))
+    fit_line2 = nparr(list(fit2_points1) + list(fit2_points2))
+    fit_errs1 = nparr(list(fit1_errs1) + list(fit1_errs2))
+    fit_errs2 = nparr(list(fit2_errs1) + list(fit2_errs2))    # Define a line and errors to be shown on graph
+    # Note: the units are the same as the graph units
+    times = times1.tolist() + times2.tolist()
+    lines = list(fit_line1)
+    errm = list(fit_line1 - 3. * fit_errs1)
+    errp = list(fit_line1 + 3. * fit_errs1)    # FIXME: since this gets called multiple times, we have to make sure
+    #        that no lines are present to prevent duplicates/redundancy
+    # Also: the key 'lines' is not present during the unit test, so we need
+    #       to check for its presence.
+    extra_lines = [list(zip(times, lines))]
+    extra_areaerrors = [list(zip(times, errm, errp))]    # now do the mva chi2 test
+    # mva_test1 = hypo_test_mva(centers1, entries1, errors1, fit_results2)
+    # mva_test2 = hypo_test_mva(centers2, entries2, errors2, fit_results1)    # Here, we're converting the numpy data types to standard python
+    # data types (array -> list, float64 -> float)
+    result = {
+        # Here's the lreg value we're interested in
+        'value': float(combined_p),
+        'extra': {
+            'areaerrors': extra_areaerrors,
+            'lines': extra_lines
+        }
+    }
+    return result
+
+def covariance_form_test(result1, cov1, result2, cov2):
+    '''
+    Calculate covariance form of a 2D multi-variate gaussian for the
+    difference vector between the two point estimates
+    result1 = np.matrix([[slope1[0]], [offset1[0]]],
+    this is a vector x1 = slope, x2 = offset
+    '''
+    try:
+        result = result1 - result2
+        # from multivariate error propagation
+        cov = cov1 + cov2
+        # correspoding multivariate gaussian
+        cov_inv = np.linalg.inv(cov)
+        # depends on inverse of covariance matrix
+        chi2_val = result.transpose() @ cov_inv @ result
+        # this is the argument of
+        # the 2D gaussian, it follows a Chi2 distribution with ndof = 2
+        # returns one-sided p-value
+        return stats.chi2.sf(chi2_val.item(0), 2)
+    except:
+        return 0.0
+
+def chi2test(ypoints, regpoints, ddof=1, yerrors=None):
+    '''
+    Applies a Chi2-test for goodness of Fit and returns chi2 and p-value
+    '''
+    if yerrors is not None:
+        terms = ((ypoints - regpoints) / yerrors) ** 2
+    else:
+        terms = (ypoints - regpoints) ** 2 / regpoints
+
+    chi2 = np.sum(terms)
+
+    p = stats.chi2.sf(chi2, terms.size - 1 - ddof)
+
+    return chi2, p
+
+def date_to_julian(date_string):
+    # Convert date string to datetime object
+    date_string = date_string[:26]
+    dt_object = datetime.strptime(date_string, '%Y-%m-%d %H:%M:%S.%f')
+    
+    # Calculate Julian date
+    a = (14 - dt_object.month) // 12
+    y = dt_object.year + 4800 - a
+    m = dt_object.month + 12*a - 3
+    julian_date = dt_object.day + ((153*m + 2)//5) + 365*y + y//4 - y//100 + y//400 - 32045
+    
+    # Add fractional part of the day
+    julian_date += (dt_object.hour - 12) / 24.0 + dt_object.minute / 1440.0 + dt_object.second / 86400.0 + dt_object.microsecond / 86400000000.0
+    
+    return julian_date
+
+def calculate_time_difference(start_time_str, end_time_str):
+    # Truncate fractional seconds to 6 digits
+    start_time_str = start_time_str[:26]
+    end_time_str = end_time_str[:26]
+
+    # Convert string representations to datetime objects
+    start_time = datetime.strptime(start_time_str, "%Y-%m-%d %H:%M:%S.%f")
+    end_time = datetime.strptime(end_time_str, "%Y-%m-%d %H:%M:%S.%f")
+
+    # Calculate the time difference
+    time_difference = end_time - start_time
+
+    # Convert time difference to minutes
+    minutes_difference = time_difference.total_seconds() / 60
+
+    return minutes_difference
+
+def chi2fit(xpoints, ypoints, yerrors):
+    '''
+    Define some intermediate terms (analytic solution to
+    neyman's chisquare definition, assuming sigma=sqrt(N))
+    '''
+    a = np.sum(xpoints / (yerrors ** 2))
+    b = np.sum(1. / (yerrors ** 2))
+    c = np.sum(ypoints / (yerrors ** 2))
+    d = np.sum((xpoints ** 2) / (yerrors ** 2))
+    e = np.sum((xpoints * ypoints) / (yerrors ** 2))
+
+    # point estimates
+    slope = (e * b - c * a) / (d * b - a ** 2)
+    offset = (d * c - e * a) / (d * b - a ** 2)
+
+    # cov matrix elements
+    v_aa = b / (d * b - a ** 2)
+    v_bb = d / (d * b - a ** 2)
+    v_ab = -a / (d * b - a ** 2)
+
+    yfit = np.poly1d([slope, offset])
+    # uncorrelated errors on x and y
+    yerrs = lambda x: np.sqrt(v_bb + v_aa * (np.asarray(x) ** 2)
+                              + 2. * v_ab * np.asarray(x))
+
+    covmatrix = np.zeros(shape=(2, 2))
+    covmatrix[0] = [v_aa, v_ab]
+    covmatrix[1] = [v_ab, v_bb]
+
+    # slope_err = np.sqrt(v_aa)
+    slope_err = 0.0
+
+    # offset_err = np.sqrt(v_bb)
+    offset_err = 0.0
+
+    vslope = (slope, slope_err)
+    voffset = (offset, offset_err)
+    covar = np.array([[v_aa, v_ab], [v_ab, v_bb]])
+
+    return (yfit, yerrs, (vslope, voffset), covar)
+
+
+
+def julian_to_date(julian_date):
+    # Calculate the integer part of the Julian date
+    integer_part = int(julian_date)
+    
+    # Calculate the fractional part of the day
+    fractional_part = julian_date - integer_part
+    
+    # Calculate the number of days
+    days = integer_part + 32044
+    
+    # Perform calendar reform to convert Julian date to Gregorian date
+    g = days // 146097
+    dg = days % 146097
+    c = (dg // 36524 + 1) * 3 // 4
+    dc = dg - c * 36524
+    b = dc // 1461
+    db = dc % 1461
+    a = (db // 365 + 1) * 3 // 4
+    da = db - a * 365
+    
+    # Calculate the year, month, and day
+    y = g * 400 + c * 100 + b * 4 + a
+    m = (da * 5 + 308) // 153 - 2
+    d = da - (m + 4) * 153 // 5 + 122
+    
+    # Adjust for zero-based indexing
+    y -= 4800
+    m += 2
+    
+    # Calculate the time part
+    seconds = int(fractional_part * 86400)
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    seconds = seconds % 60
+    
+    # Create a datetime object
+    dt_object = datetime(y, m, d, hours, minutes, seconds)
+    
+    # Format the datetime object as a string
+    date_string = dt_object.strftime('%Y-%m-%d %H:%M:%S.%f')
+    
+    return date_string
+
+################################
+
+DomCal transition runs
+
+################################
+
+newDOMcal_runs = [
+    118397, # new DOMCal: domcal-20110529-icetop
+    118695, # new DOMCal: rev. domcal-20110831-icetop
+    118767, # new DOMCal: rev. domcal-20110929-icetop
+    119016, # new DOMCal: rev. domcal-20111107-icetop
+    119366, # new DOMCal: rev. domcal-20111221-icetop
+    119506, # new DOMCal: rev. domcal-20120115-icetop
+    119879, # Runs 872-878 are all BAD, so choose the next good one #119874, # new DOMCal: rev. domcal-20120319-icetop
+    120049, # new DOMCal: rev. domcal-20120419-icetop
+    120321, # new DOMCal: rev. domcal-20120526-icetop
+    120383, # new DOMCal: rev. domcal-20120618-icetop
+    120484, # new DOMCal: rev. domcal-20120715-icetop
+    120599, # new DOMCal: rev. domcal-20120816-icetop
+    120816, # new DOMCal: rev. domcal-20120921-icetop
+    120863, # new DOMCal IT: rev. domcal-20121018-icetop
+    120918, # new DOMCal: rev. domcal-20120921-icetop
+    121615, # new DOMCal: rev. domcal-20121208-icetop  # ---- first changeover of calendar 2013
+    121674, # new DOMCal: rev. domcal-20130112-icetop
+    121878, # new DOMCal: rev. domcal-20130208-icetop
+    122090, # original is a BAD run, so choose the next good one # new DOMCal: rev. domcal-20130308-icetop
+    122200,  # Runs 186-199 are all labeled BAD, so choose next GOOD one #122186, # new DOMCal: rev. domcal-20130410-icetop
+    122363, # original is a BAD run, so choose the next good one # 122362, # new DOMCal: rev. domcal-20130513-icetop
+    122523, # new DOMCal: rev. domcal-20130607-icetop
+    122668, # new DOMCal: domcal-20130709-icetop
+    122926, # new DOMCal: domcal-20130827-icetop
+    122998, # new DOMCal: domcal-20130908-icetop
+    123118, # new DOMCal: domcal-20131008-icetop
+    123184, # original is a BAD run, so choose the next good one: # 123183, # new DOMCal: domcal-20131008-icetop (patched)
+    123240, # new DOMCal: domcal-20131108-icetop
+    123738, # the original run is "Partial I3, and not all keys, so take next good run instead (see replacemap) #123738, # new DOMCal: domcal-20131228-icetop
+    123985, # new DOMCal: domcal-20140118-icetop 
+    124199, # new DOMCal: domcal-20140209-icetop
+    124644, # new DOMCal: domcal-20140416-icetop
+    124779, # new DOMCal: domcal-20140518-icetop
+    124891, # new DOMCal: domcal-20140615-icetop
+    125057, # new DOMCal: domcal-20140713-icetop 
+    125171, # new DOMCal: domcal-20140811-icetop
+    125289, # new DOMCal: domcal-20140908-icetop
+    125424, # new DOMCal: domcal-20141009-icetop 
+    125595, # new DOMCal: domcal-20141108-icetop
+    125736, # new DOMCal: domcal-20141213-icetop
+    125908, # new DOMCal: domcal-20150107-icetop #--- First changeover of calendar 2015 -------
+    126030, # new DOMCal: domcal-20150207-icetop
+    126257, # new DOMCal: domcal-20150407-icetop
+    126378, # new DOMCal: domcal-20150509-icetop
+    126479, # new DOMCal: domcal-20150609-icetop
+    126618, # new DOMCal: domcal-20150708-icetop
+    126735, # new DOMCal: domcal-20150811-icetop 
+    126850, # new DOMCal: domcal-20150908-icetop
+    126982, # new DOMCal: domcal-20151008-icetop
+    127091, # new DOMCal: domcal-20151108-icetop
+    127246, # new DOMCal: domcal-20151208-icetop
+    127398, # new DOMCal: domcal-20160107-icetop  #----  First changeover of calendar 2016 --------
+    127568, # new DOMCal: domcal-20160210-icetop
+    #127700, Runs 700-703 are labeled bad... so ignore this one and 704 is the first GOOD run # new DOMCal: domcal-20160307-icetop
+    127704, # new DOMCal: domcal-20160307-icetop
+    127809, # new DOMCal: domcal-20160408-icetop
+    #127890, Runs 890-893 are labeled bad... so ignore this one and 894 is the first GOOD run # new DOMCal: domcal-20160408-icetop
+    127894, # new DOMCal: domcal-20160408-icetop
+    127932, # new DOMCal: domcal-20160508-icetop
+    127951, # first good run after this (BAD) changeover: #127950, # new DOMCal: domcal-20160508-icetop
+    128141, # new DOMCal: domcal-20160608-icetop
+    128242, # new DOMCal: domcal-20160710-icetop
+    128399, # new DOMCal: domcal-20160814-icetop
+    128502, # new DOMCal: domcal-20160907-icetop
+    128623, # new DOMCal: domcal-20161007-icetop
+    128750, # new DOMCal: domcal-20161107-icetop
+    128922, # new DOMCal: domcal-20161209-icetop
+    129065, # first good run after this (BAD) changeover: #129063, # new DOMCal: domcal-20170108-icetop
+    129210, # new DOMCal: domcal-20170213-icetop
+    #129268, # new DOMCal: domcal-20170303-icetop # Runs 268-270 are all listed as BAD, so ignore this one
+    129271, # new DOMCal: domcal-20170303-icetop
+    #129309, # new DOMCal: domcal-20170303-icetop # Runs 309-312 are all listed as "charge harvesting" and BAD.  So ignore this one.
+    129313, # new DOMCal: domcal-20170213-icetop
+    #129365,  ## sometime during calendar 2017, this is when gcdserver was first used (Not actually a new DOMCal run)
+    129386, # new DOMCal: domcal-20170408-icetop
+    129477, # new DOMCal: domcal-20170501-icetop
+    129523, # new DOMCal: domcal-20170501-icetop  ## IC86.2017 run start -- DUPLICATE?
+    129650, # new DOMCal: domcal-20170608-icetop
+    129779, # new DOMCal: domcal-20170709-icetop
+    129899, # new DOMCal: domcal-20170808-icetop
+    130003, # new DOMCal: domcal-20170908-icetop
+    130138, # new DOMCal: domcal-20171008-icetop
+    130241, # new DOMCal: domcal-20171109-icetop
+    130413, # new DOMCal: domcal-20171210-icetop  # This run has partial IceTop but technically "good" <---- see "replacemap" below
+    130557, # new DOMCal: domcal-20180108-icetop
+    130681, # new DOMCal: domcal-20180209-icetop
+    130835, # new DOMCal: domcal-20180307-icetop
+    130933, # new DOMCal: domcal-20180408-icetop
+    131042, # new DOMCal: domcal-20180508-icetop
+    131145, # new DOMCal: domcal-20180608-icetop
+    131293, # new domcal: domcal-20180710-icetop
+    131387, # new domcals: domcal-20180808-icetop
+    131513, # new domcals: domcal-20180908-icetop
+    131632, # new domcals: domcal-20181011-icetop
+    131741, # new domcals: domcal-20181106-icetop
+    131932, # new domcals: domcal-20181209-icetop
+    132074, # new DOMCals: domcal-20190112-icetop
+    132219, # new domcals: domcal-20190212-icetop
+    132302, # new domcals: domcal-20190308-icetop
+    132454, # new domcals: domcal-20190405-icetop
+    132574, # new domcals: domcal-20190509-icetop
+    132695, # new domcals: domcal-20190608-icetop
+    132844, # new domcals: domcal-20190712-icetop
+    132954, # new domcals: domcal-20190808-icetop
+    133050, # new domcals: domcal-20190907-icetop
+    133175, # new domcals: domcal-20191008-icetop
+    133284, # new domcals: domcal-20191109-icetop
+    133429, # new domcals: domcal-20191208-icetop
+    133628, # new domcals: domcal-20200111-icetop
+    133729, # new domcals: domcal-20200209-icetop
+    133856, # new domcals: domcal-20200310-icetop
+    133968, # new domcals: domcal-20200408-icetop
+    134081, # new domcals: domcal-20200510-icetop
+    134184, # new domcals: domcal-20200609-icetop
+    134284, # new domcals: domcal-20200708-icetop
+    134372, # new domcals: domcal-20200807-icetop
+    134490, # new domcals: domcal-20200910-icetop
+    134599, # new domcals: domcal-20201009-icetop
+    134706, # new domcals: domcal-20201109-icetop
+    134798, # new domcals: domcal-20201211-icetop
+    134901, # new domcals: domcal-20210109-icetop
+    134984, # new domcals: domcal-20210208-icetop
+    135101, # new domcals: domcal-20210308-icetop
+    135188, # new domcals: domcal-20210408-icetop
+    135298, # new domcals: domcal-20210510-icetop
+    135389, # new domcals: domcal-20210609-icetop
+    135490, # new domcals: domcal-20210707-icetop
+    135623, # new domcals: domcal-20210809-icetop
+    135703, # new domcals: domcal-20210908-icetop
+    135805, # new domcals: domcal-20211009-icetop
+    135909, # new domcals: domcal-20211108-icetop
+    136048, # new domcals: domcal-20211208-icetop
+    136161, # new domcals: domcal-20220108-icetop
+    136329, # new domcals: domcal-20220208-icetop
+    136438, # new domcals: domcal-20220311-icetop # apparently new DOMCals inserted during previous run (136437) but then retracted... this one is official (?)
+    136529, # new domcals: domcal-20220408-icetop
+    136636, # new domcals: domcal-20220508-icetop
+    136731, # new domcals: domcal-20220611-icetop
+    136828, # new domcals: domcal-20220708-icetop # a little before start of IC86.2022 (not including test run)
+    136897, # RunStart IC86.2022 -- not technically a DOMCal turnover, but enough things changed that it might as well be!
+    136950, # new domcals: domcal-20220807-icetop
+    137048, # new domcals: domcal-20220908-icetop
+    137145, # new domcals: domcal-20221008-icetop
+    137263, # new domcals: domcal-20221110-icetop
+    137358, # new domcals: domcal-20221207-icetop
+    137534, # new domcals: domcal-20230109-icetop # in mongo database, recorded as 137533, but that run is bad. 534 according to i3live.
+    137644, # new domcals: domcal-20230207-icetop
+    137736, # new domcals: domcal-20230307-icetop
+    137829, # new domcals: domcal-20230408-icetop
+    137956, # new domcals: domcal-20230509-icetop
+    138042, # new domcals: domcal-20230607-icetop
+    138144, # new domcals: domcal-20230708-icetop
+    138258, # new domcals: domcal-20230807-icetop
+    138351,
+    138435,
+    138578, # a little bit before IC86.2023 run start
+    138615, # IC86.2023 run start: new DOMCals for inice only, but other stuff changed (HV?) in Detector Status, so we'll call this a turnover as well
+    138692,
+    138839,
+    139002,
+    139174,
+    139279, # error in i3live, which listed the injected run as 139278,
+    139395,
+    139529
+]
+
+############################################
+
+This loads in the data from Kath's directory
+
+############################################
+
+directory = '/data/user/kath/jsonl_from_moni/'
+file_list = []
+data = []
+filtered_files = []
+
+for filename in os.listdir(directory):
+    if os.path.isfile(os.path.join(directory, filename)):
+        file_path = os.path.join(directory, filename)  # Get the full file path
+        file_list.append(file_path)
+
+filtered_files = [file for file in file_list if file.startswith("/data/user/kath/jsonl_from_moni/ITSLCChargeCalResults")]        
+
+# Iterate over the list of files
+#n = 0 
+for text in filtered_files[0:300]:
+    #print('start', n)
+    with open(text, 'r') as file:
+        #print('mid', n)
+        for line in file:
+            data.append(json.loads(line))
+
+#######################################################################################
+
+This creates the dictionary to pull the data out of the JSON files into workable arrays
+
+#######################################################################################
+
+main_dict = {}
+
+for i in range(1, 82):
+    for j in range(61, 65):
+        for k in [0, 1]:
+            for l in [0, 1, 2]:
+                if i < 10:
+                    key = '0' + str(i) + '_' + str(j) + '_' + str(k) + '_' + str(l)
+                else:
+                    key = str(i) + '_' + str(j) + '_' + str(k) + '_' + str(l)
+                
+                main_dict[key] = {
+                    'ReSOCA': [],
+                    'Time': [],
+                    'Run': [],
+                    'p0': [],
+                    'p1': []
+                }
+                
+                for item in data:
+                    if (item['value']['om'] == j and 
+                        item['value']['string'] == i and 
+                        item['value']['chip'] == k and
+                        item['value']['channel'] == l):
+                        
+                            x = item['value']['result']['chi2']
+                            y = item['value']['result']['n']
+                            start = item['value']['recordingStartTime']
+                            stop = item['value']['recordingStopTime']
+                            difference = calculate_time_difference(start, stop)
+                        
+                            if x is None or difference < 15:
+                                continue
+                        
+                            reduced_value = x / (y - 2)
+                            main_dict[key]['ReSOCA'].append(reduced_value)
+                            main_dict[key]['Time'].append(date_to_julian(start))
+                            main_dict[key]['Run'].append(item['value']['runNumber'])
+                            #main_dict[key]['p0'].append(item['value']['result']['p0'])
+                            #main_dict[key]['p1'].append(item['value']['result']['p1'])
+
+
+for key in main_dict:
+    # Convert arrays to numpy arrays with appropriate data types
+    main_array = np.array(main_dict[key]['Time'], dtype=float)
+    array1 = np.array(main_dict[key]['ReSOCA'], dtype=float)
+    array2 = np.array(main_dict[key]['Run'], dtype=float)
+    #array3 = np.array(main_dict[key]['p0'], dtype=float)
+    #array4 = np.array(main_dict[key]['p1'], dtype=float)
+
+    # Get the indices that would sort the main_array
+    sorted_indices = np.argsort(main_array)
+
+    # Sort all arrays based on the sorted indices
+    main_dict[key]['Time'] = main_array[sorted_indices]
+    main_dict[key]['ReSOCA'] = array1[sorted_indices]
+    main_dict[key]['Run'] = array2[sorted_indices]
+    #main_dict[key]['p0'] = array3[sorted_indices]
+    #main_dict[key]['p1'] = array4[sorted_indices]
+
+################################################################################################################################################################################################
+
+# This hear is the code that removes the crazy large outliers from the data, I'm pretty sure this and jump check code can be
+# combined but I don't wanna try and combine them and end up breaking it
+
+################################################################################################################################################################################################
+
+fit_length = 5  # This can be set to 10 to start the fitting process with the first 10 values
+max_fit_length = 90  # Cap the fitting process at 90 values
+
+for key in main_dict:
+    main_dict[key]['cut_chi'] = []
+    main_dict[key]['cut_time'] = []
+    main_dict[key]['outliers'] = []
+    main_dict[key]['cut_run'] = []
+    time_data = np.array(main_dict[key]['Time'])
+    data_set = np.array(main_dict[key]['ReSOCA'])
+    run_data = np.array(main_dict[key]['Run'])
+    count = 0
+    previous_run = None
+
+    index = fit_length  # Start from the 10th element
+
+    while index < len(data_set):
+        item = data_set[index]
+        try:
+            # Adjust the fitting window
+            window_size = min(max_fit_length, index + 1)  # Ensure the window does not exceed max_fit_length
+            start_index = max(0, index - window_size + 1)
+
+            time_array = time_data[start_index:index + 1]
+            resoca_array = data_set[start_index:index + 1]
+            std_array = np.full(len(resoca_array), 3 * np.std(resoca_array))
+
+            regression_result = get_linear_regression(time_array, resoca_array, std_array)
+            data = regression_result['extra']['areaerrors'][0]
+
+            # Extract x, ylow, and yhigh values from the nested list of tuples
+            x_values = [point[0] for point in data]
+            ylow_values = [point[1] for point in data]
+            yhigh_values = [point[2] for point in data]
+
+            if len(x_values) == 0 or len(ylow_values) == 0 or len(yhigh_values) == 0:
+                print(f"Empty x or y values for key {key}")
+                index += 1
+                continue
+
+            # Check for outliers
+            if (item > yhigh_values[-1] or item < ylow_values[-1]):
+                if (data_set[index + 1] > yhigh_values[-1] or data_set[index + 1] < ylow_values[-1]):
+                    if (data_set[index + 2] > yhigh_values[-1] or data_set[index + 2] < ylow_values[-1]):
+                        for run in newDOMcal_runs:
+                            if previous_run <= run <= main_dict[key]['Run'][index]:
+                                # Condition alpha
+                                #print(f'There was a dom cal at index {index} in key {key}')
+                                index += fit_length  # Skip forward fit_length indices
+                                if index >= len(data_set):
+                                    break  # Exit the while loop if index is out of bounds
+                                start_index = index  # Reset the starting index
+                                continue  # Skip the rest of the current loop iteration
+
+                # Ensure index is within bounds before deleting
+                if index < len(data_set):
+                    main_dict[key]['outliers'].append(item)
+                    data_set = np.delete(data_set, index)
+                    time_data = np.delete(time_data, index)
+                    run_data = np.delete(run_data, index)
+                    count += 1
+                    # Do not increment index since the array length has decreased
+                else:
+                    break
+            else:
+                index += 1
+
+            if previous_run is not None:
+                continue
+            else:
+                previous_run = main_dict[key]['Run'][index]
+
+        # Handle errors
+        except Exception as e:
+            #print(f"Error in regression for key {key}: {e}")
+            index += 1
+            continue
+
+    main_dict[key]['chi_linear_cut'] = count
+    main_dict[key]['cut_chi'] = data_set
+    main_dict[key]['cut_time'] = time_data
+    main_dict[key]['cut_run'] = run_data
+
+########################################################################################################################################
+
+Here is the code that detects whan a jump occurs, or the jump check code
+
+########################################################################################################################################
+fit_length = 5  # Start the fitting process with the first 10 values
+max_fit_length = 90  # Cap the fitting process at 90 values
+total_jumpers = 0
+
+for key in main_dict.keys():
+    main_dict[key]['cut_chi'] = []
+    main_dict[key]['cut_time'] = []
+    main_dict[key]['outliers'] = []
+    time_data = np.array(main_dict[key]['Time'])
+    data_set = np.array(main_dict[key]['ReSOCA'])
+    count = 0
+    previous_run = None
+    domcal_count = 0
+    use_fixed_window = False  # Flag to track if a fixed window size should be used
+    n = 0
+    r = 0
+    jump_detector = 0
+
+    index = fit_length  # Start from the 10th element
+
+    while index < len(data_set):
+        item = data_set[index]
+        try:
+            #print('____________________________________________________________________________________________')
+
+            #### This below is an artifact from when I was working on it and I don't really get why I have it now but I 
+            #### don't wanna break it so I've left it in
+            ####
+            if use_fixed_window:
+                window_size = min(max_fit_length, fit_length + n)  # Fixed window size after DOMcal transition
+                start_index = max(start, index - window_size)
+                time_array = time_data[start_index:index]
+                resoca_array = data_set[start_index:index]            
+            else:            
+                # Adjust the fitting window normally
+                window_size = min(max_fit_length, index-1) 
+                start_index = max(0, index - window_size)
+                time_array = time_data[start_index:index]
+                resoca_array = data_set[start_index:index]
+
+            std_array = np.full(len(resoca_array[:index-1]), 8 * np.std(resoca_array[:index-1]))
+
+            regression_result = get_linear_regression(time_array[:index-1], resoca_array[:index-1], std_array)
+            data = regression_result['extra']['areaerrors'][0]
+
+            x_values = [point[0] for point in data]
+            ylow_values = [point[1] for point in data]
+            yhigh_values = [point[2] for point in data]
+
+            if len(x_values) == 0 or len(ylow_values) == 0 or len(yhigh_values) == 0:
+                #print(f"Empty x or y values for key {key}")
+                index += 1
+                continue
+
+            # DOMcal transition handling
+            #print(index)
+            if main_dict[key]['Run'][index] >= newDOMcal_runs[r]:
+                r += 1
+                if (data_set[index] > yhigh_values[-1] or data_set[index] < ylow_values[-1]):
+                    #print(index)
+                    jump_detector += 1
+
+                index += fit_length   # Move index forward by new fit_length
+                use_fixed_window = True
+                n = 0
+                start = index - fit_length + 1                
+                index += 1  # Ensure index progresses
+                continue  # This ensures the outlier check is skipped
+            n += 1        
+        except Exception as e:
+            #print(f"Error in regression for key {key}: {e}")
+            index += 1
+            continue
+
+        index += 1  # Ensure the index increments outside of the DOMcal transition handling
+
+    main_dict[key]['chi_linear_cut'] = count
+    main_dict[key]['cut_chi'] = data_set
+    main_dict[key]['cut_time'] = time_data
+
+
+    if jump_detector > 0:
+        total_jumpers += 1
+        print(f"'Jump Detected at {key}',")
+
+################################################################################################################################################################################################
+
+This prints the new graphs with the outliers removed
+
+################################################################################################################################################################################################
+
+for key in main_dict:
+    plt.figure(figsize=(15,6))
+    plt.plot(main_dict[key]['cut_time'], main_dict[key]['cut_chi'], label='Chi as a function of Time', color='green')
+
+    # Title and labels
+    plt.title(f'Soca {key}')
+    plt.xlabel('Time')
+    plt.ylabel('Chi Squared')
+
+    # Plot a vertical dotted red line at every run in newDOMcal_runs
+    #for run in [r for r in newDOMcal_runs if r >= 138150]:
+        #plt.axvline(x=run, color='red', linestyle='--', linewidth=1, label=f'DOMcal Run {run}')
+
+    # Add the legend and show the plot
+    plt.legend()
+    plt.show()
+
