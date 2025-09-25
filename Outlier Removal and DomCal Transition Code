@@ -1,0 +1,130 @@
+fit_length = 5  # Start the fitting process with the first 10 values
+max_fit_length = 90  # Cap the fitting process at 90 values
+key = '08_63_0_2'  # Run the analysis on the single key
+
+main_dict[key]['cut_chi'] = []
+main_dict[key]['cut_time'] = []
+main_dict[key]['outliers'] = []
+time_data = np.array(main_dict[key]['Time'])
+data_set = np.array(main_dict[key]['ReSOCA'])
+count = 0
+previous_run = None
+domcal_count = 0
+use_fixed_window = False  # Flag to track if a fixed window size should be used
+n = 0
+r = 0
+jump_detector = 0
+
+index = fit_length  # Start from the 10th element
+
+while index < len(data_set):
+    item = data_set[index]
+    try:
+        print('____________________________________________________________________________________________')
+        
+        # Check if we should use the fixed window size (due to DOMcal transition)
+        if use_fixed_window:
+            window_size = min(max_fit_length, fit_length + n)  # Fixed window size after DOMcal transition
+            start_index = max(start, index - window_size)
+            time_array = time_data[start_index:index]
+            resoca_array = data_set[start_index:index]            
+        else:            
+            # Adjust the fitting window normally
+            window_size = min(max_fit_length, index-1) 
+            start_index = max(0, index - window_size)
+            time_array = time_data[start_index:index]
+            resoca_array = data_set[start_index:index]
+            
+        print(f'{start_index} here is the start index for the graph below')
+        print(f"{window_size} window size of the graph below")
+
+        std_array = np.full(len(resoca_array[:index]), 5 * np.std(resoca_array[:index]))
+
+        regression_result = get_linear_regression(time_array[:index-1], resoca_array[:index-1], std_array)
+        data = regression_result['extra']['areaerrors'][0]
+
+        x_values = [point[0] for point in data]
+        ylow_values = [point[1] for point in data]
+        yhigh_values = [point[2] for point in data]
+        
+        if len(x_values) == 0 or len(ylow_values) == 0 or len(yhigh_values) == 0:
+            print(f"Empty x or y values for key {key}")
+            index += 1
+            continue
+
+        plt.figure(figsize=(15, 6))
+        plt.plot(time_array[:index-1], resoca_array[:index-1], marker='o', linestyle='-', linewidth=1, color='red', label='Reduced Chi Squared')
+
+        y_values = [(ylow + yhigh) / 2 for ylow, yhigh in zip(ylow_values, yhigh_values)]
+        plt.plot(x_values, y_values, color='black', linestyle='--', label='Line of Best Fit')
+        plt.plot(x_values, yhigh_values, linestyle='-', color='black')
+        plt.plot(x_values, ylow_values, linestyle='-', color='black', label='8 sigma uncertainty on Best Fit')
+        plt.fill_between(x_values, ylow_values, yhigh_values, color='gray', alpha=0.3)
+
+        if index < len(data_set):
+            plt.scatter(time_data[index-1], data_set[index-1], color='blue', label=index-1, zorder=5)
+            plt.scatter(time_data[index], data_set[index], color='green', label=index, zorder=5)
+            plt.scatter(time_data[index+1], data_set[index+1], color='yellow', label=index, zorder=5)
+
+            
+        plt.axhline(y=np.array(yhigh_values)[-1], color='red', linestyle='--', label='High Value Line')
+        plt.axhline(y=np.array(ylow_values)[-1], color='blue', linestyle='--', label='Low Value Line')
+
+        plt.legend()
+        plt.title(f"Time series of SOCA with Linear Regression of Soca {key} {index}")
+        plt.xlabel('Time (By Julian Date since first Run)')
+        plt.ylabel('Reduced Chi Squared')
+        plt.grid(True)
+        plt.show()
+        
+        # DOMcal transition handling
+        print(main_dict[key]['Run'][index-3])
+        print(main_dict[key]['Run'][index])
+
+        if main_dict[key]['Run'][index] >= newDOMcal_runs[r]:
+            
+            #print(run)
+            print(f'{index} is the index of where the domcal jump occured')
+            print(f'This is the new domcal run number {newDOMcal_runs[r]}')
+            print(f"This is the index run number {main_dict[key]['Run'][index]}")
+            r += 1
+            if (data_set[index] > yhigh_values[-1] or data_set[index] < ylow_values[-1]):
+                jump_detector += 1
+                print("HEY A JUMP GOT DETECTED##########################################################################")
+            index += fit_length   # Move index forward by new fit_length
+            use_fixed_window = True
+            n = 0
+            start = index - fit_length + 1
+            print(f"{start_index} is the start index")
+            print(f"{window_size} is the window size")
+                
+                
+            index += 1  # Ensure index progresses
+            continue  # This ensures the outlier check is skipped
+
+        n += 1        
+        # Check for outliers
+        print(f'{yhigh_values[-1]} is the upper bound, {ylow_values[-1]} is the lower bound')
+        print(f'{data_set[index]} is the value measured at index {index}')
+        if (data_set[index] > yhigh_values[-1] or data_set[index] < ylow_values[-1]):
+            print('step one')
+            if index < len(data_set):
+                main_dict[key]['outliers'].append(item)
+                print(f'the deleted value was {data_set[index]} at index {index}')
+                data_set = np.delete(data_set, index)
+                time_data = np.delete(time_data, index)
+                count += 1
+            else:
+                break
+        else:
+            index += 1
+
+    # Handle errors
+    except Exception as e:
+        print(f"Error in regression for key {key}: {e}")
+        index += 1
+        continue
+
+main_dict[key]['chi_linear_cut'] = count
+main_dict[key]['cut_chi'] = data_set
+main_dict[key]['cut_time'] = time_data
