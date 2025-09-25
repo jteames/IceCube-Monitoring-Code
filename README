@@ -26,6 +26,21 @@ pdaq: StringHub polls DOMs for buffered hardware monitoring events. Data is sent
 
 **## Comments**
 
+DOM SLC/HLC Linear Fit Chi-Squared Statistic
+
+This page shows monitoring of the reduced chi-squared statistic derived 
+from the SLC/HLC linear fit for each DOM over time. The plots display the 
+chi-squared values against time, with a linear regression and associated 
+error bounds overlaid to highlight long-term trends.
+
+The purpose of this monitoring is to identify abnormal behavior in the fits. 
+While most DOMs produce chi-squared values within expected ranges, extreme 
+outliers (on the order of 15–20σ from the mean) can occur, indicating a very 
+poor fit. Such outliers are flagged and removed to ensure data quality. In 
+addition, sudden jumps linked to DOMCal transitions are also highlighted. 
+Overall, this page provides a high-level view of fit quality across DOMs, 
+helping maintain reliable data for IceCube analyses.
+
 **## JSON Example**  
 ```json
 {
