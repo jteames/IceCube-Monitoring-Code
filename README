@@ -12,7 +12,10 @@ In the current code, variable names are
 - *max_fit_length*
   
 **## Motivation**  
-When looking at the Chi Squared statistic of the SLC/HLC Linear fits, we occasionally see extreme outliers in the chi squared, meaning the goodness of the HLC/SLC fit was extremely poor. So, we've developed this monitoring code to detect these outliers and eliminate them from our data measurements.
+When looking at the Chi Squared statistic of the SLC/HLC Linear fits, we 
+occasionally see extreme outliers in the chi squared, meaning the goodness 
+of the HLC/SLC fit was extremely poor. So, we've developed this monitoring 
+code to detect these outliers and eliminate them from our data measurements.
 
 **## Data Provenance**
 
@@ -20,9 +23,14 @@ dom moni stream → StringHub → moniBuilder → I3Live → reduced chi squared
 
 **## Data Aggregation**
 
-doms: The DOM FPGA counts SPE and MPE hits in separate scalers. They are read out periodically at configurable interval by DOMApp and buffered in the monitoring event stream ("hardware monitoring events") inside the DOM.
+doms: The DOM FPGA counts SPE and MPE hits in separate scalers. They are read out 
+periodically at configurable interval by DOMApp and buffered in the monitoring event 
+stream ("hardware monitoring events") inside the DOM.
 
-pdaq: StringHub polls DOMs for buffered hardware monitoring events. Data is sent to the monitoring thread of the SecondaryBuilders component which must sum the counts for each DOM over intervals of ten minutes. At the end of each interval, a JSON map of '(string, DOM)' to integer counts should be sent to Live.
+pdaq: StringHub polls DOMs for buffered hardware monitoring events. Data is sent to 
+the monitoring thread of the SecondaryBuilders component which must sum the counts 
+for each DOM over intervals of ten minutes. At the end of each interval, a JSON map 
+of '(string, DOM)' to integer counts should be sent to Live.
 
 **## Comments**
 
@@ -40,6 +48,9 @@ poor fit. Such outliers are flagged and removed to ensure data quality. In
 addition, sudden jumps linked to DOMCal transitions are also highlighted. 
 Overall, this page provides a high-level view of fit quality across DOMs, 
 helping maintain reliable data for IceCube analyses.
+
+In order to contruct the graphs, the live code should pull data from either ~90 days of 
+data collection, or back to last time a DomCal transition jump occured.
 
 **## JSON Example**  
 ```json
